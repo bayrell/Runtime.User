@@ -1,0 +1,218 @@
+/*!
+ *  Bayrell Runtime Library
+ *
+ *  (c) Copyright 2018-2019 "Ildar Bikmamatov" <support@bayrell.org>
+ *
+ *  Licensed under the Apache License, Version 2.0 (the "License");
+ *  you may not use this file except in compliance with the License.
+ *  You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ *  Unless required by applicable law or agreed to in writing, software
+ *  distributed under the License is distributed on an "AS IS" BASIS,
+ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *  See the License for the specific language governing permissions and
+ *  limitations under the License.
+ */
+
+namespace Runtime.User;
+
+use Runtime.MessageRPC;
+use Runtime.RuntimeUtils;
+use Runtime.User.LoginPageModel;
+use Runtime.Web.Button.Button;
+use Runtime.Web.Input.Input;
+use Runtime.Web.UI.Component;
+use Runtime.Web.UI.LayoutModel;
+use Runtime.Web.UI.Events.Mouse.MouseClickEvent;
+use Runtime.Web.UI.Events.Mouse.MouseContextMenuEvent;
+
+
+class LoginPage extends Component
+{
+	
+	public LoginPageModel model;
+	
+	
+	/**
+	 * Returns model name
+	 */
+	lambda string modelName() => classof LoginPageModel;
+	
+	
+	
+	/**
+	 * Returns require components
+	 */
+	lambda Collection<string> components() => 
+	[
+		classof Button,
+		classof Input,
+	];
+	
+	
+	
+	/**
+	 * Component css
+	 */
+	lambda string css(Dict<string> vars) =>
+		@css{
+			%app{
+				padding-top: 50px;
+				margin-left: auto;
+				margin-right: auto;
+				width: 300px;
+			}
+			%app_title{
+				text-align: center;
+				font-weight: bold;
+				font-size: 22px;
+			}
+			%app_row{
+				padding-bottom: 10px;
+			}
+			%app_row:last-child{
+				padding-bottom: 0px;
+			}
+			%app %(Input)input{
+				width: 100%;
+			}
+			%app %(Button)button{
+				cursor: pointer;
+			}
+			%app_buttons{
+				text-align: center;
+			}
+			%app_result{
+				text-align: center;
+			}
+			%app_result--error{
+				color: red;
+			}
+			%app_result--success{
+				color: green;
+			}
+		}
+	;
+	
+	
+	
+	/**
+	 * Component render
+	 */
+	lambda html render(LayoutModel layout, LoginPageModel model, Dict params, html content, var control) =>
+		<div @class='app'>
+			<div @class='app_row app_title'>
+				Authorization
+			</div>
+			
+			<div @class='app_row'>
+				<div @class='app_row_label'>Login</div>
+				<div @class='app_row_input'>
+					<Input name='faydel_auth_login' @bind="login"></Input>
+				</div>
+			</div>
+			
+			<div @class='app_row'>
+				<div @class='app_row_label'>Password</div>
+				<div @class='app_row_input'>
+					<Input name='faydel_auth_password' type='password' @bind="password"></Input>
+				</div>
+			</div>
+			
+			<div @class='app_row app_buttons'>
+				<Button @tag='login' @eventAsync:MouseClickEvent="onButtonClick">Login</Button>
+			</div>
+			
+			{ static::renderResult(layout, model, control) }
+		</div>
+	;
+	
+	
+	
+	/**
+	 * Render result
+	 */
+	lambda html renderResult(LayoutModel layout, LoginPageModel model, var control)
+	{
+		if (model.error_code == 0)
+		{
+			if (model.error_str == "") return "";
+			return
+				<div @class="app_result">
+					{ model.error_str }
+				</div>
+			;
+		}
+		if (model.error_code > 0)
+		{
+			return
+				<div @class="app_result app_result--success">
+					{ (model.error_str == "") ? _("OK", "Runtime") : model.error_str }
+				</div>
+			;
+		}
+		
+		return 
+			<div @class="app_result app_result--error">
+				{ model.error_str }
+			</div>
+		;
+	}
+	
+	
+	/* ---------------------------------- Events ----------------------------------- */
+	
+	
+	/**
+	 * Button click
+	 */
+	public async void onButtonClick(MouseClickEvent e)
+	{
+		/* Update model */
+		this.updateModel
+		{
+			"error_kind": "",
+			"error_str": _("Wait please", "Runtime"),
+		};
+		
+		/* Login */
+		MessageRPC api_res = await @->sendMessage
+		(
+			new MessageRPC
+			{
+				"uri": this.driver.layout_model.route_prefix ~ "/login/do/",
+				"data":
+				{
+					"login": this.model.login,
+					"password": this.model.password,
+				}
+			}
+		);
+		
+		/* Message result */
+		if (api_res and api_res.have_result)
+		{
+			/* Update model */
+			this.updateModel
+			{
+				"error_code": api_res.code,
+				"error_str": api_res.error,
+			};
+		}
+		else
+		{
+			/* Update model */
+			this.updateModel
+			{
+				"error_code": -1,
+				"error_str": _("No result", "Runtime"),
+			};
+		}
+		
+	}
+	
+	
+	
+}

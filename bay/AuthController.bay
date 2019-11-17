@@ -1,0 +1,262 @@
+/*!
+ *  Bayrell Runtime Library
+ *
+ *  (c) Copyright 2018-2019 "Ildar Bikmamatov" <support@bayrell.org>
+ *
+ *  Licensed under the Apache License, Version 2.0 (the "License");
+ *  you may not use this file except in compliance with the License.
+ *  You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ *  Unless required by applicable law or agreed to in writing, software
+ *  distributed under the License is distributed on an "AS IS" BASIS,
+ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *  See the License for the specific language governing permissions and
+ *  limitations under the License.
+ */
+ 
+namespace Runtime.User;
+
+use Runtime.CoreProvider;
+use Runtime.DateTime;
+use Runtime.MessageRPC;
+use Runtime.RuntimeConstant;
+use Runtime.RuntimeUtils;
+use Runtime.Crypt.Password;
+use Runtime.ORM.DataProviderInterface;
+use Runtime.ORM.OrmQuery;
+use Runtime.User.AuthToken;
+use Runtime.User.LoginPage;
+use Runtime.User.LoginPageModel;
+use Runtime.User.User;
+use Runtime.Web.Http.Cookie;
+use Runtime.Web.Http.JsonResponse;
+use Runtime.Web.Http.Response;
+use Runtime.Web.UI.ApiList;
+use Runtime.Web.UI.ApiMethod;
+use Runtime.Web.UI.LayoutModel;
+use Runtime.Web.UI.RenderContainer;
+use Runtime.Web.UI.RenderHelper;
+use Runtime.Web.UI.Route;
+use Runtime.Web.UI.RouteList;
+
+
+@ApiList{ "api_name": "Runtime.User" }
+class AuthController
+{
+	
+	#ifdef BACKEND then
+	
+	
+	/**
+	 * Login
+	 * @return MessageRPC
+	 */
+	@ApiMethod{ "space_name": "Runtime.Auth.SSO", "method_name": "login" }
+	static async MessageRPC login(MessageRPC msg)
+	{
+		string login = (string) msg.data.get("login", "");
+		string password = (string) msg.data.get("password", "");
+		if (login == "" or password == "")
+		{
+			return msg->fail( _("Login error", "Auth"), RuntimeConstant::ERROR_AUTH, null );
+		}
+		
+		DataProviderInterface provider = @->getProvider(classof DataProviderInterface, "default");
+		
+		/* Get user by login */
+		OrmQuery q = new OrmQuery()
+			-> select ( "auth_users", null )
+			-> asModel ( classof User, true )
+			-> filter
+			{
+				"login": login,
+			}
+			-> offset(0, 1)
+		;
+		User user = await q->fetchOne(provider);
+		if (user == null)
+		{
+			return msg->fail( _("Login error", "Auth"), RuntimeConstant::ERROR_AUTH, null );
+		}
+		
+		/* Get users password */
+		OrmQuery q = new OrmQuery()
+			-> select ( "auth_users_password", null )
+			-> filter
+			{
+				"user_id": user.id,
+			}
+			-> offset(0, 1)
+		;
+		Dict user_password = await q->fetchOne(provider);
+		
+		string password_hash = "";
+		if (user_password != null) password_hash = (string) user_password.get("password", "");
+		
+		/* Verify password */
+		bool check_password = Password::verify(password, password_hash);
+		if (!check_password)
+		{
+			return msg->fail( _("Login error", "Auth"), RuntimeConstant::ERROR_AUTH, null );
+		}
+		
+		/* Read settings */
+		string auth_private_key = (string) @.config(["providers", "Runtime.User", "AuthToken", "private_key"]);
+		int auth_token_expire = (int) @.config(["providers", "Runtime.User", "AuthToken", "expire"]);
+		
+		/* Create session */
+		int time = @.time();
+		int expire = time + auth_token_expire;
+		DateTime gmtime_add = DateTime::timestamp(time);
+		DateTime gmtime_expire = DateTime::timestamp(expire);
+		
+		/* Test session */
+		string session_key = "test";
+		OrmQuery q = new OrmQuery()
+			-> insertOrUpdate ( "auth_sessions" )
+			-> valuesPk
+			{
+				"session_key": session_key,
+			}
+			-> valuesInsert
+			{
+				"gmtime_add": gmtime_add,
+			}
+			-> values
+			{
+				"user_id": user.id,
+				"gmtime_expire": gmtime_expire,
+			}
+		;
+		
+		await q->execute(provider);
+		
+		/* Create token */
+		AuthToken auth_token = new AuthToken
+		{
+			"created": time,
+			"expire": expire,
+			"user_id": user.id,
+			"login": user.login,
+			"session_key": session_key,
+		};
+		auth_token = auth_token->sign(auth_private_key);
+		return msg->success(auth_token);
+	}
+	
+	
+	
+	/**
+	 * Logout
+	 * @return MessageRPC
+	 */
+	@ApiMethod{ "space_name": "Runtime.Auth.SSO", "method_name": "logout" }
+	static async MessageRPC logout(MessageRPC msg)
+	{
+		string auth_token_str = (string) msg.data.get("token_str", "");
+		string auth_public_key = (string) @.config(["providers", "Runtime.User", "AuthToken", "public_key"]);
+		string auth_private_key = (string) @.config(["providers", "Runtime.User", "AuthToken", "private_key"]);
+		
+		AuthToken auth_token = AuthToken::read(auth_token_str, auth_public_key);
+		if (auth_token)
+		{
+			DataProviderInterface provider = @->getProvider(classof DataProviderInterface, "default");
+			
+			OrmQuery q = new OrmQuery()
+				-> delete ( "auth_sessions" )
+				-> filter
+				{
+					"session_key": auth_token.session_key,
+				}
+			;
+			
+			await q->execute(provider);
+			return msg->success(true);
+		}
+		
+		return msg->success(false);
+	}
+	
+	
+	
+	/**
+	 * Update token
+	 * @return string
+	 */
+	@ApiMethod{ "space_name": "Runtime.Auth.SSO", "method_name": "updateToken" }
+	static async MessageRPC updateToken(MessageRPC msg)
+	{
+		string auth_token_str = (string) msg.data.get("token_str", "");
+		string auth_private_key = (string) @.config(["providers", "Runtime.User", "AuthToken", "private_key"]);
+		string auth_public_key = (string) @.config(["providers", "Runtime.User", "AuthToken", "public_key"]);
+		int update_token_time = (int) @.config(["providers", "Runtime.User", "AuthToken", "update"], 3600);
+		int auth_token_expire = (int) @.config(["providers", "Runtime.User", "AuthToken", "expire"]);
+		
+		/* Check auth token */
+		AuthToken auth_token = AuthToken::read(auth_token_str, auth_public_key);
+		if (not auth_token) return msg->fail(false);
+		
+		/* Check session */
+		Dict session = await static::getSession(auth_token.session_key);
+		if (session == null) return msg->fail(false);
+		
+		/* Update token if need */
+		int time = @.time();
+		int expire = time + auth_token_expire;
+		
+		if (time - update_token_time > auth_token.created)
+		{
+			auth_token = auth_token.copy{ "created": time, "expire": expire };
+			auth_token = auth_token->sign(auth_private_key);
+			
+			DateTime gmtime_expire = DateTime::timestamp(expire);
+			OrmQuery q = new OrmQuery()
+				-> update ( "auth_sessions" )
+				-> values
+				{
+					"gmtime_expire": gmtime_expire,
+					
+				}
+				-> filter
+				{
+					"session_key": auth_token.session_key,
+				}
+			;
+			
+			DataProviderInterface provider = @->getProvider(classof DataProviderInterface, "default");
+			await q->execute(provider);
+			
+			return msg->success(auth_token);
+		}
+		
+		return msg->success(auth_token);
+	}
+	
+	
+	
+	/**
+	 * Returns session
+	 * @return bool
+	 */
+	static async Dict getSession(string session_key)
+	{
+		DataProviderInterface provider = @->getProvider(classof DataProviderInterface, "default");
+		
+		OrmQuery q = new OrmQuery()
+			-> select ( "auth_sessions", null )
+			-> filter
+			{
+				"session_key": session_key,
+			}
+			-> offset(0, 1)
+		;
+		Dict session = await q->fetchOne(provider);
+		
+		return session;
+	}
+	
+	#endif
+	
+}

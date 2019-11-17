@@ -1,0 +1,240 @@
+/*!
+ *  Bayrell Runtime Library
+ *
+ *  (c) Copyright 2018-2019 "Ildar Bikmamatov" <support@bayrell.org>
+ *
+ *  Licensed under the Apache License, Version 2.0 (the "License");
+ *  you may not use this file except in compliance with the License.
+ *  You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ *  Unless required by applicable law or agreed to in writing, software
+ *  distributed under the License is distributed on an "AS IS" BASIS,
+ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *  See the License for the specific language governing permissions and
+ *  limitations under the License.
+ */
+ 
+namespace Runtime.User;
+
+use Runtime.CoreProvider;
+use Runtime.DateTime;
+use Runtime.MessageRPC;
+use Runtime.RuntimeConstant;
+use Runtime.RuntimeUtils;
+use Runtime.Crypt.Password;
+use Runtime.ORM.DataProviderInterface;
+use Runtime.ORM.OrmQuery;
+use Runtime.User.AuthToken;
+use Runtime.User.LoginPage;
+use Runtime.User.LoginPageModel;
+use Runtime.User.User;
+use Runtime.Web.Http.Cookie;
+use Runtime.Web.Http.JsonResponse;
+use Runtime.Web.Http.Response;
+use Runtime.Web.UI.ApiList;
+use Runtime.Web.UI.ApiMethod;
+use Runtime.Web.UI.LayoutModel;
+use Runtime.Web.UI.RenderContainer;
+use Runtime.Web.UI.RenderHelper;
+use Runtime.Web.UI.Route;
+use Runtime.Web.UI.RouteList;
+
+
+@ApiList{ "api_name": "Runtime.User" }
+@RouteList{}
+class LoginController
+{
+	
+	
+	/**
+	 * Login Action
+	 * @return WebContainer
+	 */
+	@Route{ "uri": "/login/", "name": "main:login" }
+	static async RenderContainer LoginAction(RenderContainer container)
+	{		
+		/* Set title */
+		container <= layout <= title <= "Login page";
+		
+		/* Create model */
+		container = RenderHelper::renderLazy
+		(
+			classof LoginPage, new LoginPageModel{ "login": "", "password": "" }, "default", container
+		);
+		
+		return container;
+	}
+	
+	
+	
+	/**
+	 * Logout Action
+	 * @return WebContainer
+	 */
+	@Route{ "uri": "/logout/", "name": "main:logout" }
+	static async RenderContainer LogoutAction(RenderContainer container)
+	{		
+		/* Set title */
+		container <= layout <= title <= "Logout page";
+		
+		AuthToken auth_token = container.layout.pocket.get("Runtime.User.AuthToken", null);
+		if (auth_token)
+		{
+			MessageRPC msg = await @->sendMessage
+			(
+				new MessageRPC
+				{
+					"api_name": "Runtime.User",
+					"space_name": "Runtime.Auth.SSO",
+					"method_name": "logout",
+					"data":
+					{
+						"token_str": auth_token.token_str,
+					}
+				}
+			);
+			
+			if (msg->isSuccess() and msg.response)
+			{
+				string auth_cookie_name = (string) @.config(
+					["providers", "Runtime.User", "AuthToken", "cookie_name"]
+				);
+				
+				/* Remove cookie */
+				container = container->setCookie
+				(
+					new Cookie
+					{
+						"name": auth_cookie_name,
+						"value": "",
+						"expire": 0,
+						"path": "/",
+						"httponly": true,
+					}
+				);
+			}
+			
+			/* Ok */
+			container <= response <= new Response{ "content": "1" };
+		}
+		else
+		{
+			container <= response <= new Response{ "content": "0" };
+		}
+		
+		return container;
+	}
+	
+	
+	
+	/**
+	 * Check login
+	 * @return WebContainer
+	 */
+	@Route{ "uri": "/login/check/", "name": "main:login:check" }
+	static async RenderContainer LoginCheck(RenderContainer container)
+	{
+		string auth_cookie_name = (string) @.config(["providers", "Runtime.User", "AuthToken", "cookie_name"]);
+		
+		Cookie cookie = container->getCookie( auth_cookie_name );
+		if (not cookie)
+		{
+			container <= response <= new Response{ "content": "0" };
+			return container;
+		}
+		
+		string auth_token_str = cookie.value;
+		string auth_public_key = (string) @.config(["providers", "Runtime.User", "AuthToken", "public_key"]);
+		AuthToken auth_token = AuthToken::read(auth_token_str, auth_public_key);
+		if (not auth_token)
+		{
+			container <= response <= new Response{ "content": "0" };
+			return container;
+		}
+		
+		container <= response <= new Response{ "content": "1" };
+		return container;
+	}
+	
+	
+	
+	
+	#ifdef BACKEND then
+	
+	
+	/**
+	 * Login Action
+	 * @return WebContainer
+	 */
+	@Route{ "uri": "/login/do/", "name": "main:login" }
+	static async RenderContainer LoginDoAction(RenderContainer container)
+	{
+		Dict data = container->getApiData();
+		string login = (string) data.get("login", "");
+		string password = (string) data.get("password", "");
+		
+		MessageRPC msg = await @->sendMessage
+		(
+			new MessageRPC
+			{
+				"api_name": "Runtime.User",
+				"space_name": "Runtime.Auth.SSO",
+				"method_name": "login",
+				"data":
+				{
+					"login": login,
+					"password": password,
+				}
+			}
+		);
+		
+		if (not msg->isSuccess())
+		{
+			container <= response <= new JsonResponse
+			{
+				"data": 
+				{
+					"have_result": true,
+					"error": msg.error,
+					"code": msg.code,
+					"response": false,
+				}
+			};
+			return container;
+		}
+		
+		AuthToken auth_token = msg.response;
+		
+		/* Set cookie */
+		string auth_cookie_name = (string) @.config(["providers", "Runtime.User", "AuthToken", "cookie_name"]);
+		container = container->setCookie
+		(
+			new Cookie
+			{
+				"name": auth_cookie_name,
+				"value": auth_token.token_str,
+				"expire": auth_token.expire,
+				"path": "/",
+				"httponly": true,
+			}
+		);
+		
+		container <= response <= new JsonResponse
+		{
+			"data": 
+			{
+				"have_result": true,
+				"error": "Ok",
+				"code": 1,
+				"response": true,
+			}
+		};
+		return container;
+	}
+	
+	
+	#endif
+	
+}
